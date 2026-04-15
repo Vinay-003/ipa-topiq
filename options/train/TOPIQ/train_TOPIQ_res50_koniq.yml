@@ -2,7 +2,7 @@ name: 002_CFANet_Res50_koniq
 # name: debug_model
 model_type: GeneralIQAModel 
 auto_resume: true
-num_gpu: 1  # set num_gpu: 0 for cpu mode
+num_gpu: 2  # set num_gpu: 0 for cpu mode
 manual_seed: 123 
 
 define: &img_size_oneside 384 
@@ -18,9 +18,9 @@ datasets:
   train:
     name: koniq10k
     type: GeneralNRDataset
-    dataroot_target: ./datasets/koniq10k/512x384
-    meta_info_file: ./datasets/meta_info/meta_info_KonIQ10kDataset.csv
-    split_file: ./datasets/meta_info/koniq10k_official.pkl
+    dataroot_target: /kaggle/working/ipa-topiq/datasets/koniq10k/512x384
+    meta_info_file: /kaggle/working/ipa-topiq/datasets/meta_info/meta_info_KonIQ10kDataset.csv
+    split_file: /kaggle/working/ipa-topiq/datasets/meta_info/koniq10k_official.pkl
     mos_range: [0, 100]
     lower_better: false 
     mos_normalize: true
@@ -40,9 +40,9 @@ datasets:
   val:
     name: koniq10k
     type: GeneralNRDataset
-    dataroot_target: ./datasets/koniq10k/512x384
-    meta_info_file: ./datasets/meta_info/meta_info_KonIQ10kDataset.csv
-    split_file: ./datasets/meta_info/koniq10k_official.pkl
+    dataroot_target: /kaggle/working/ipa-topiq/datasets/koniq10k/512x384
+    meta_info_file: /kaggle/working/ipa-topiq/datasets/meta_info/meta_info_KonIQ10kDataset.csv
+    split_file: /kaggle/working/ipa-topiq/datasets/meta_info/koniq10k_official.pkl
 
 # network structures
 network:
