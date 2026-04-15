@@ -1,6 +1,7 @@
 import datetime
 import logging
 import math
+import signal
 import time
 import torch
 import os
@@ -141,6 +142,21 @@ def load_resume_state(opt):
     return resume_state
 
 
+# DELTA: Time-based checkpoint cadence for long-running sessions.
+def _get_timed_checkpoint_interval(opt, elapsed_seconds):
+    logger_opt = opt.get('logger', {})
+    if not logger_opt.get('timed_checkpoint', False):
+        return None
+
+    late_start_hours = float(logger_opt.get('timed_checkpoint_late_start_hours', 5.0))
+    early_minutes = float(logger_opt.get('timed_checkpoint_early_minutes', 60.0))
+    late_minutes = float(logger_opt.get('timed_checkpoint_late_minutes', 10.0))
+
+    if elapsed_seconds >= late_start_hours * 3600:
+        return late_minutes * 60.0
+    return early_minutes * 60.0
+
+
 def train_pipeline(root_path, opt=None, args=None):
     # parse options, set distributed setting, set random seed
     if opt is None and args is None:
@@ -198,6 +214,13 @@ def train_pipeline(root_path, opt=None, args=None):
     # create message logger (formatted outputs)
     msg_logger = MessageLogger(opt, current_iter, tb_logger)
 
+    # DELTA: Best-effort save before exit on interrupt/error.
+    def request_stop(signum, frame):
+        raise KeyboardInterrupt(f'Received signal {signum}')
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, request_stop)
+
     # dataloader prefetcher
     prefetch_mode = opt['datasets']['train'].get('prefetch_mode')
     if prefetch_mode is None or prefetch_mode == 'cpu':
@@ -217,100 +240,125 @@ def train_pipeline(root_path, opt=None, args=None):
     logger.info(f'Start training from epoch: {start_epoch}, iter: {current_iter}')
     data_timer, iter_timer = AvgTimer(), AvgTimer()
     start_time = time.time()
+    epoch = start_epoch
 
-    for epoch in range(start_epoch, total_epochs + 1):
-        train_sampler.set_epoch(epoch)
-        prefetcher.reset()
-        train_data = prefetcher.next()
+    timed_interval = _get_timed_checkpoint_interval(opt, 0.0)
+    next_timed_save = start_time + timed_interval if timed_interval else None
 
-        while train_data is not None:
-            data_timer.record()
-
-            current_iter += 1
-            if current_iter > total_iters:
-                break
-            # update learning rate
-            # model.update_learning_rate(current_iter, warmup_iter=opt['train'].get('warmup_iter', -1))
-            # training
-            model.feed_data(train_data)
-            model.optimize_parameters(current_iter)
-            iter_timer.record()
-            if current_iter == 1:
-                # reset start time in msg_logger for more accurate eta_time
-                # not work in resume mode
-                msg_logger.reset_start_time()
-            # log
-            if current_iter % opt['logger']['print_freq'] == 0:
-                log_vars = {'epoch': epoch, 'iter': current_iter}
-                log_vars.update({'lrs': model.get_current_learning_rate()})
-                log_vars.update(
-                    {
-                        'time': iter_timer.get_avg_time(),
-                        'data_time': data_timer.get_avg_time(),
-                    }
-                )
-                log_vars.update(model.get_current_log())
-                msg_logger(log_vars)
-
-            # log images
-            log_img_freq = opt['logger'].get('log_imgs_freq', 1e99)
-            if current_iter % log_img_freq == 0:
-                visual_imgs = model.get_current_visuals()
-                if tb_logger and visual_imgs is not None:
-                    for k, v in visual_imgs.items():
-                        tb_logger.add_images(
-                            f'ckpt_imgs/{k}', v.clamp(0, 1), current_iter
-                        )
-
-            # save models and training states
-            save_ckpt_freq = opt['logger'].get('save_checkpoint_freq', 9e9)
-            if current_iter % save_ckpt_freq == 0:
-                logger.info('Saving models and training states.')
-                model.save(epoch, current_iter)
-
-            if current_iter % opt['logger']['save_latest_freq'] == 0:
-                logger.info('Saving latest models and training states.')
-                model.save(epoch, -1)
-
-            # validation
-            if opt.get('val') is not None and (
-                current_iter % opt['val']['val_freq'] == 0
-            ):
-                logger.info(
-                    f'{len(val_loaders)} validation datasets are used for validation.'
-                )
-                for val_loader in val_loaders:
-                    model.validation(
-                        val_loader, current_iter, tb_logger, opt['val']['save_img']
-                    )
-
-            data_timer.start()
-            iter_timer.start()
+    try:
+        for epoch in range(start_epoch, total_epochs + 1):
+            train_sampler.set_epoch(epoch)
+            prefetcher.reset()
             train_data = prefetcher.next()
 
-            if 'debug' in opt['name'] and current_iter >= 8:
-                break
-        # end of iter
-        # use epoch based learning rate scheduler
-        model.update_learning_rate(
-            epoch + 2, warmup_iter=opt['train'].get('warmup_iter', -1)
-        )
+            while train_data is not None:
+                data_timer.record()
 
-        if 'debug' in opt['name'] and epoch >= 2:
-            break
-    # end of epoch
+                current_iter += 1
+                if current_iter > total_iters:
+                    break
+                # update learning rate
+                # model.update_learning_rate(current_iter, warmup_iter=opt['train'].get('warmup_iter', -1))
+                # training
+                model.feed_data(train_data)
+                model.optimize_parameters(current_iter)
+                iter_timer.record()
+                if current_iter == 1:
+                    # reset start time in msg_logger for more accurate eta_time
+                    # not work in resume mode
+                    msg_logger.reset_start_time()
+                # log
+                if current_iter % opt['logger']['print_freq'] == 0:
+                    log_vars = {'epoch': epoch, 'iter': current_iter}
+                    log_vars.update({'lrs': model.get_current_learning_rate()})
+                    log_vars.update(
+                        {
+                            'time': iter_timer.get_avg_time(),
+                            'data_time': data_timer.get_avg_time(),
+                        }
+                    )
+                    log_vars.update(model.get_current_log())
+                    msg_logger(log_vars)
 
-    consumed_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
-    logger.info(f'End of training. Time consumed: {consumed_time}')
-    logger.info('Save the latest model.')
-    model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
-    if opt.get('val') is not None:
-        for val_loader in val_loaders:
-            model.validation(
-                val_loader, current_iter, tb_logger, opt['val']['save_img']
+                # log images
+                log_img_freq = opt['logger'].get('log_imgs_freq', 1e99)
+                if current_iter % log_img_freq == 0:
+                    visual_imgs = model.get_current_visuals()
+                    if tb_logger and visual_imgs is not None:
+                        for k, v in visual_imgs.items():
+                            tb_logger.add_images(
+                                f'ckpt_imgs/{k}', v.clamp(0, 1), current_iter
+                            )
+
+                # save models and training states
+                save_ckpt_freq = opt['logger'].get('save_checkpoint_freq', 9e9)
+                if current_iter % save_ckpt_freq == 0:
+                    logger.info('Saving models and training states.')
+                    model.save(epoch, current_iter)
+
+                if current_iter % opt['logger']['save_latest_freq'] == 0:
+                    logger.info('Saving latest models and training states.')
+                    model.save(epoch, -1)
+
+                if next_timed_save is not None and time.time() >= next_timed_save:
+                    logger.info('Saving timed checkpoint and training state.')
+                    model.save(epoch, current_iter)
+                    elapsed_seconds = time.time() - start_time
+                    timed_interval = _get_timed_checkpoint_interval(
+                        opt, elapsed_seconds
+                    )
+                    next_timed_save = time.time() + timed_interval
+
+                # validation
+                if opt.get('val') is not None and (
+                    current_iter % opt['val']['val_freq'] == 0
+                ):
+                    logger.info(
+                        f'{len(val_loaders)} validation datasets are used for validation.'
+                    )
+                    for val_loader in val_loaders:
+                        model.validation(
+                            val_loader, current_iter, tb_logger, opt['val']['save_img']
+                        )
+
+                data_timer.start()
+                iter_timer.start()
+                train_data = prefetcher.next()
+
+                if 'debug' in opt['name'] and current_iter >= 8:
+                    break
+            # end of iter
+            # use epoch based learning rate scheduler
+            model.update_learning_rate(
+                epoch + 2, warmup_iter=opt['train'].get('warmup_iter', -1)
             )
-    if tb_logger:
-        tb_logger.close()
+
+            if 'debug' in opt['name'] and epoch >= 2:
+                break
+        # end of epoch
+
+        consumed_time = str(datetime.timedelta(seconds=int(time.time() - start_time)))
+        logger.info(f'End of training. Time consumed: {consumed_time}')
+        logger.info('Save the latest model.')
+        model.save(epoch=-1, current_iter=-1)  # -1 stands for the latest
+        if opt.get('val') is not None:
+            for val_loader in val_loaders:
+                model.validation(
+                    val_loader, current_iter, tb_logger, opt['val']['save_img']
+                )
+    except BaseException as exc:
+        if current_iter > 0:
+            logger.exception(
+                f'Training interrupted at epoch {epoch}, iter {current_iter}. Saving before exit.'
+            )
+            model.save(epoch, current_iter)
+            model.save(epoch, -1)
+        else:
+            logger.exception('Training interrupted before the first iteration completed.')
+        raise
+    finally:
+        if tb_logger:
+            tb_logger.close()
 
     if opt['rank'] == 0:
         return model.best_metric_results

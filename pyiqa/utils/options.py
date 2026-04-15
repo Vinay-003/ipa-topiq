@@ -160,7 +160,7 @@ def parse_options(root_path, is_train=True):
             # using exec function
             exec(eval_str)
 
-    opt['auto_resume'] = args.auto_resume
+    opt['auto_resume'] = args.auto_resume or opt.get('auto_resume', False)
     opt['is_train'] = is_train
 
     # debug setting

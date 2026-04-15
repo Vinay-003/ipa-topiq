@@ -1,6 +1,7 @@
 name: 002_CFANet_Res50_cgfiqa
 # name: debug_model
 model_type: GeneralIQAModel 
+auto_resume: true
 num_gpu: 1  # set num_gpu: 0 for cpu mode
 manual_seed: 123 
 
@@ -101,6 +102,10 @@ val:
 logger:
   print_freq: 100
   save_latest_freq: !!float 500 
+  timed_checkpoint: true
+  timed_checkpoint_early_minutes: 60
+  timed_checkpoint_late_start_hours: 5
+  timed_checkpoint_late_minutes: 10
   log_imgs_freq: 1000
   use_tb_logger: true
   wandb:
