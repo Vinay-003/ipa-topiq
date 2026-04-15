@@ -1,0 +1,45 @@
+name: test_TOPIQ_res50_tid2013
+model_type: GeneralIQAModel
+num_gpu: 1
+manual_seed: 123
+
+datasets:
+  test:
+    name: tid2013
+    type: GeneralFRDataset
+    dataroot_target: /kaggle/working/ipa-topiq/datasets/tid2013/distorted_images
+    dataroot_ref: /kaggle/working/ipa-topiq/datasets/tid2013/reference_images
+    meta_info_file: /kaggle/working/ipa-topiq/datasets/meta_info/meta_info_TID2013Dataset.csv
+    mos_range: [0, 9]
+    lower_better: false
+    img_range: 1
+    batch_size_per_gpu: 1
+    num_worker_per_gpu: 2
+
+network:
+  type: CFANet
+  use_ref: false
+  pretrained: false
+  num_crop: 1
+  num_attn_layers: 1
+  crop_size: [384, 384]
+  semantic_model_name: resnet50
+  block_pool: weighted_avg
+
+train:
+  use_ref: false
+
+path:
+  pretrain_network: /kaggle/working/ipa-topiq/experiments/002_CFANet_Res50_koniq_archived_20260415_120306/models/net_best.pth
+  strict_load: true
+
+val:
+  save_img: false
+  pbar: true
+  metrics:
+    srcc:
+      type: calculate_srcc
+    plcc:
+      type: calculate_plcc
+    krcc:
+      type: calculate_krcc

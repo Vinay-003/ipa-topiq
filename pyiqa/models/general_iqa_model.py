@@ -224,34 +224,35 @@ class GeneralIQAModel(BaseModel):
             for name, opt_ in self.opt['val']['metrics'].items():
                 self.metric_results[name] = calculate_metric([pred_score, gt_mos], opt_)
 
-            if self.key_metric is not None:
-                # If the best metric is updated, update and save best model
-                to_update = self._update_best_metric_result(
-                    dataset_name,
-                    self.key_metric,
-                    self.metric_results[self.key_metric],
-                    current_iter,
-                )
+            if self.is_train and hasattr(self, 'net_best'):
+                if self.key_metric is not None:
+                    # If the best metric is updated, update and save best model
+                    to_update = self._update_best_metric_result(
+                        dataset_name,
+                        self.key_metric,
+                        self.metric_results[self.key_metric],
+                        current_iter,
+                    )
 
-                if to_update:
+                    if to_update:
+                        for name, opt_ in self.opt['val']['metrics'].items():
+                            self._update_metric_result(
+                                dataset_name, name, self.metric_results[name], current_iter
+                            )
+                        self.copy_model(self.net, self.net_best)
+                        self.save_network(self.net_best, 'net_best')
+                else:
+                    # update each metric separately
+                    updated = []
                     for name, opt_ in self.opt['val']['metrics'].items():
-                        self._update_metric_result(
+                        tmp_updated = self._update_best_metric_result(
                             dataset_name, name, self.metric_results[name], current_iter
                         )
-                    self.copy_model(self.net, self.net_best)
-                    self.save_network(self.net_best, 'net_best')
-            else:
-                # update each metric separately
-                updated = []
-                for name, opt_ in self.opt['val']['metrics'].items():
-                    tmp_updated = self._update_best_metric_result(
-                        dataset_name, name, self.metric_results[name], current_iter
-                    )
-                    updated.append(tmp_updated)
-                # save best model if any metric is updated
-                if sum(updated):
-                    self.copy_model(self.net, self.net_best)
-                    self.save_network(self.net_best, 'net_best')
+                        updated.append(tmp_updated)
+                    # save best model if any metric is updated
+                    if sum(updated):
+                        self.copy_model(self.net, self.net_best)
+                        self.save_network(self.net_best, 'net_best')
 
             self._log_validation_metric_values(current_iter, dataset_name, tb_logger)
 
