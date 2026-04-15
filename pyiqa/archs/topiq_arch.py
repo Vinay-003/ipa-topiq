@@ -207,6 +207,52 @@ class GatedConv(nn.Module):
         return x1 * weight
 
 
+# DELTA: Lightweight branch for distortion-heavy synthetic artifacts.
+class DistortionStatsBranch(nn.Module):
+    """Predict quality from non-learnable high-frequency residuals."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, 3, padding=1, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, 3, padding=1, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.head = nn.Linear(64, 1)
+        self.act = nn.ReLU(inplace=True)
+        self.register_buffer('blur_kernel', torch.ones(3, 1, 5, 5) / 25.0)
+
+    def get_hf_residual(self, x):
+        kernel = self.blur_kernel.to(dtype=x.dtype)
+        blurred = F.conv2d(x, kernel, padding=2, groups=3)
+        return x - blurred
+
+    def forward(self, x):
+        hf = self.get_hf_residual(x)
+        hf = self.act(self.conv1(hf))
+        hf = self.act(self.conv2(hf))
+        hf = self.act(self.conv3(hf))
+        hf = self.pool(hf).flatten(1)
+        return self.head(hf)
+
+
+# DELTA: Adaptive semantic-vs-distortion fusion from pooled backbone features.
+class AdaptiveFusionGate(nn.Module):
+    """Predict the semantic-branch weight from pooled backbone features."""
+
+    def __init__(self, in_channels):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(in_channels, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 1),
+            nn.Sigmoid(),
+        )
+        nn.init.constant_(self.gate[-2].bias, 1.7)
+
+    def forward(self, global_feat):
+        return self.gate(global_feat)
+
+
 @ARCH_REGISTRY.register()
 class CFANet(nn.Module):
     """TOPIQ/CFANet architecture for NR and FR quality prediction.
@@ -402,6 +448,17 @@ class CFANet(nn.Module):
 
         self.score_linear = nn.Sequential(*self.score_linear)
 
+        # DELTA: Enable adaptive fusion only for scalar no-reference quality prediction.
+        self.use_distortion_fusion = (not use_ref) and self.num_class == 1
+        self.global_feat_dim = feature_dim_list[-1]
+        if self.use_distortion_fusion:
+            self.distortion_branch = DistortionStatsBranch()
+            self.fusion_gate = AdaptiveFusionGate(in_channels=self.global_feat_dim)
+            self.sem_scale = nn.Parameter(torch.ones(1))
+            self.sem_bias = nn.Parameter(torch.zeros(1))
+            self.dist_scale = nn.Parameter(torch.ones(1))
+            self.dist_bias = nn.Parameter(torch.zeros(1))
+
         self.h_emb = nn.Parameter(torch.randn(1, inter_dim // 2, 32, 1))
         self.w_emb = nn.Parameter(torch.randn(1, inter_dim // 2, 1, 32))
 
@@ -418,7 +475,10 @@ class CFANet(nn.Module):
             )
         elif pretrained:
             load_pretrained_network(
-                self, default_model_urls[model_name], True, weight_keys='params'
+                self,
+                default_model_urls[model_name],
+                not self.use_distortion_fusion,
+                weight_keys='params',
             )
 
         self.eps = 1e-8
@@ -474,7 +534,7 @@ class CFANet(nn.Module):
     def dist_func(self, x, y, eps=1e-12):
         return torch.sqrt((x - y) ** 2 + eps)
 
-    def forward_cross_attention(self, x, y=None):
+    def forward_cross_attention(self, x, y=None, return_global_feat=False):
         # resize image when testing
         if not self.training:
             if 'swin' in self.semantic_model_name:
@@ -557,7 +617,13 @@ class CFANet(nn.Module):
             query_list.append(query)
 
         final_feat = self.attn_pool(query)
-        out_score = self.score_linear(final_feat.mean(dim=0))
+        pooled_feat = final_feat.mean(dim=0)
+        out_score = self.score_linear(pooled_feat)
+
+        if return_global_feat:
+            # DELTA: Reuse the backbone layer4 global feature for adaptive fusion.
+            global_feat = dist_feat_list[end_level - 1].mean(dim=(2, 3))
+            return out_score, global_feat
 
         return out_score
 
@@ -624,11 +690,35 @@ class CFANet(nn.Module):
             else:
                 x = uniform_crop([x], self.crop_size, self.crops)[0]
 
-            score = self.forward_cross_attention(x, y)
+            if self.use_distortion_fusion:
+                # DELTA: Preserve the existing semantic score, then fuse with distortion statistics.
+                semantic_score, global_feat = self.forward_cross_attention(
+                    x, y, return_global_feat=True
+                )
+                distortion_score = self.distortion_branch(x)
+                alpha = self.fusion_gate(global_feat)
+                semantic_score = self.sem_scale * semantic_score + self.sem_bias
+                distortion_score = (
+                    self.dist_scale * distortion_score + self.dist_bias
+                )
+                score = alpha * semantic_score + (1 - alpha) * distortion_score
+            else:
+                score = self.forward_cross_attention(x, y)
             score = score.reshape(bsz, self.crops, self.num_class)
             score = score.mean(dim=1)
         else:
-            score = self.forward_cross_attention(x, y)
+            if self.use_distortion_fusion:
+                # DELTA: Preserve the existing semantic score, then fuse with distortion statistics.
+                semantic_score, global_feat = self.forward_cross_attention(
+                    x, y, return_global_feat=True
+                )
+                distortion_score = self.distortion_branch(x)
+                alpha = self.fusion_gate(global_feat)
+                semantic_score = self.sem_scale * semantic_score + self.sem_bias
+                distortion_score = self.dist_scale * distortion_score + self.dist_bias
+                score = alpha * semantic_score + (1 - alpha) * distortion_score
+            else:
+                score = self.forward_cross_attention(x, y)
 
         mos = dist_to_mos(score)
 

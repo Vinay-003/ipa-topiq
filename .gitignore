@@ -12,7 +12,8 @@ tmp*
 
 *.DS_Store
 .idea
-
+.venv-topiq-check
+.venv-topiq-check/*
 # ignored files
 version.py
 
