@@ -28,9 +28,8 @@ def get_meta_info():
             'c_total',
         ]
         csvwriter.writerow(new_head)
+        next(csvreader)  # skip header row
         for idx, row in enumerate(csvreader):
-            print(row)
-            split = row[9]
             if split == 'training':
                 split = 'train'
                 row[9] = 0
