@@ -1,6 +1,6 @@
 video links
-mid sem - https://drive.google.com/file/d/1gpXIkqs69U7Mq8UtF-UCV7wuIeUR4y59/view?usp=sharing
-end sem - https://drive.google.com/file/d/13Yv1wFQZxecAaM303JxRiqsYtcMQHd5Y/view?usp=sharing
+Phase 1 - https://drive.google.com/file/d/1gpXIkqs69U7Mq8UtF-UCV7wuIeUR4y59/view?usp=sharing
+Phase 2 - https://drive.google.com/file/d/13Yv1wFQZxecAaM303JxRiqsYtcMQHd5Y/view?usp=sharing
 
 ## What We Changed
 
